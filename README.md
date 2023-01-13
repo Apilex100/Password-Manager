@@ -1,3 +1,4 @@
+
 # Python Password Manager
 
 A simple local password manager written in Python and MariaDB. Uses [pbkdf2](https://en.wikipedia.org/wiki/PBKDF2) to derive a 256 bit key from a MASTER PASSWORD and DEVICE SECRET to use with AES-256 for encrypting/decrypting.
@@ -18,20 +19,6 @@ pip install -r requirements.txt
 sudo apt update
 sudo apt install mariadb-server mariadb-client -y
 ```
-#### Create user 'pm' and grant permissions
-**Login to mysql as root**
-
-```
-sudo mysql -u root
-```
-**Create User**
-```
-CREATE USER 'pm'@localhost IDENTIFIED BY 'password';
-```
-**Grant privileges**
-```
-GRANT ALL PRIVILEGES ON *.* TO 'pm'@localhost IDENTIFIED BY 'password';
-```
 
 ## Windows
 ### Install Python Requirements
@@ -40,24 +27,6 @@ GRANT ALL PRIVILEGES ON *.* TO 'pm'@localhost IDENTIFIED BY 'password';
 ### MariaDB
 #### Install
 Follow [these instructions](https://www.dataquest.io/blog/install-mysql-windows/) to install MariaDB on Windows
-#### Create user and grant privileges
-- Navigate to MariaDB bin directory
-```
-C:\Program Files\MariaDB\bin
-```
-- Login as root with the password you chose while installation
-```
-mysql.exe -u root -p
-```
-- Create user
-```
-CREATE USER 'pm'@localhost IDENTIFIED BY 'password';
-```
-- Grant privileges
-```
-GRANT ALL PRIVILEGES ON *.* TO 'pm'@localhost IDENTIFIED BY 'password';
-```
-
 
 ## Run
 ### Configure
