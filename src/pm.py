@@ -1,6 +1,7 @@
 import argparse
 from getpass import getpass
 import hashlib
+import hmac
 import pyperclip
 
 from rich import print as printc
@@ -9,6 +10,18 @@ import utils.add
 import utils.retrieve
 import utils.generate
 from utils.dbconfig import dbconfig
+
+# PBKDF2 iteration count for the master-password verification hash. Must match
+# the value used at setup time in config.py.
+MASTER_HASH_ITERATIONS = 200000
+
+
+def hashMasterPassword(mp, salt, iterations=MASTER_HASH_ITERATIONS):
+    """Derive the salted, iterated (PBKDF2-HMAC-SHA256) verification hash of the
+    master password. Returns a hex string. Kept in sync with config.py."""
+    return hashlib.pbkdf2_hmac(
+        "sha256", mp.encode(), salt, iterations
+    ).hex()
 
 parser = argparse.ArgumentParser(description='Description')
 
@@ -26,18 +39,26 @@ args = parser.parse_args()
 
 def inputAndValidateMasterPassword():
 	mp = getpass("MASTER PASSWORD: ")
-	hashed_mp = hashlib.sha256(mp.encode()).hexdigest()
 
 	db = dbconfig()
 	cursor = db.cursor()
 	query = "SELECT * FROM pm.secret"
 	cursor.execute(query)
 	result = cursor.fetchall()[0]
-	if hashed_mp != result[0]:
+
+	# result: (masterkey_hash, device_secret, salt)
+	stored_hash = result[0]
+	device_secret = result[1]
+	salt = bytes.fromhex(result[2])
+
+	# Recompute the salted, iterated PBKDF2 hash and compare in constant time
+	# (hmac.compare_digest) to avoid timing side channels.
+	computed_hash = hashMasterPassword(mp, salt)
+	if not hmac.compare_digest(computed_hash, stored_hash):
 		printc("[red][!] WRONG! [/red]")
 		return None
 
-	return [mp,result[1]]
+	return [mp, device_secret]
 
 
 def main():
