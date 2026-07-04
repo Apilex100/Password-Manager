@@ -1,48 +1,131 @@
-
 # Python Password Manager
 
-A simple local password manager written in Python and MariaDB. Uses [pbkdf2](https://en.wikipedia.org/wiki/PBKDF2) to derive a 256 bit key from a MASTER PASSWORD and DEVICE SECRET to use with AES-256 for encrypting/decrypting.
+> A local, command-line password manager that derives an AES-256 key from a master password with PBKDF2 and stores encrypted credentials in a MariaDB/MySQL database.
 
+## Overview
 
-# Installation
-You need to have python3 to run this on Windows, Linux or MacOS
-## Linux
-### Install Python Requirements
+This project is a self-hosted password manager built in Python. Credentials are encrypted with **AES-256** before they ever touch storage, and the encryption key is never stored on disk — it is re-derived on every operation from a user-supplied **master password** combined with a randomly generated, per-install **device secret** using **PBKDF2**. The tool exposes a small, argparse-driven CLI for adding entries, searching/retrieving them, and generating random passwords, with an optional clipboard copy so plaintext secrets are never printed to the terminal.
+
+The master password itself is never persisted. Only a **salted, iterated PBKDF2-HMAC-SHA256 hash** of it is stored (with a random per-install salt), and it is used solely to authenticate the user before an operation runs; verification is done with a **constant-time comparison** to avoid timing side channels. The actual encryption key material lives only in memory for the duration of a command.
+
+## Features
+
+- **AES-256 encryption of every stored password** (CBC mode with a fresh random IV per entry, base64-encoded ciphertext) — `src/utils/aesutils.py`.
+- **PBKDF2 key derivation** from the master password + device secret (256-bit key, HMAC-SHA512, 1,000,000 iterations) — `computeMasterKey()` in `src/utils/add.py`.
+- **Per-install device secret** as a cryptographic salt, generated once at configuration time — `generateDeviceSecret()` in `src/config.py`.
+- **Master-password authentication** via a **salted, iterated PBKDF2-HMAC-SHA256 hash** (200,000 iterations, random per-install salt), verified in **constant time** with `hmac.compare_digest` before any read/write — `inputAndValidateMasterPassword()` in `src/pm.py`.
+- **Add credentials** (site name, URL, email, username, password) — `addEntry()` in `src/utils/add.py`.
+- **Search & retrieve** entries by any combination of site name, URL, email, or username using **parameterized queries** (SQL-injection-safe); results render in a formatted table with passwords hidden — `retrieveEntries()` in `src/utils/retrieve.py`.
+- **Environment-variable-based database configuration** — connection credentials are read from `os.environ` (no hardcoded secrets); a missing `DB_PASSWORD` fails fast — `dbconfig()` in `src/utils/dbconfig.py`.
+- **Clipboard copy of decrypted passwords** so plaintext never appears on screen — via `pyperclip`.
+- **Random password generator** of configurable length using letters, digits, and punctuation — `generatePassword()` in `src/utils/generate.py`.
+- **Rich terminal output** with colored status messages and tables via the `rich` library.
+
+## Tech Stack
+
+- **Language:** Python 3
+- **Cryptography:** [`pycryptodome`](https://pypi.org/project/pycryptodome/) — `Crypto.Protocol.KDF.PBKDF2`, `Crypto.Cipher.AES`, `Crypto.Hash.SHA256`/`SHA512`
+- **Database:** MariaDB / MySQL via [`mysql-connector-python`](https://pypi.org/project/mysql-connector-python/)
+- **CLI:** Python standard library `argparse`
+- **Terminal UI:** [`rich`](https://pypi.org/project/rich/) (colored output + tables)
+- **Clipboard:** [`pyperclip`](https://pypi.org/project/pyperclip/)
+- **Standard library:** `hashlib` (PBKDF2), `hmac` (constant-time compare), `os` (env vars + CSPRNG salt), `getpass`, `random`, `string`, `base64`
+
+## How It Works
+
+### 1. One-time configuration (`src/config.py`)
+
+Running the config step creates the `pm` database and two tables:
+
+- `secret(masterkey_hash TEXT, device_secret TEXT, salt TEXT)`
+- `entries(sitename, siteurl, email, username, password)`
+
+You are prompted to choose a **master password**. The program then:
+
+1. Generates a random 16-byte salt (`os.urandom`) and stores `pbkdf2_hmac('sha256', master_password, salt, 200000)` (hex digest) in `secret.masterkey_hash`, with the salt in `secret.salt` — used only to verify you later, never for encryption.
+2. Generates a random 15-character alphanumeric **device secret** and stores it in `secret.device_secret`. This value acts as the PBKDF2 **salt** for the AES key derivation.
+
+### 2. Authentication (`inputAndValidateMasterPassword()` in `src/pm.py`)
+
+On every `add` or `extract` command you are prompted for the master password. The stored salt is loaded, the master password is re-hashed with **PBKDF2-HMAC-SHA256 (200,000 iterations)**, and the result is compared against the stored hash using **`hmac.compare_digest` (constant-time comparison)** to defeat timing attacks. On mismatch the operation aborts. On success, the plaintext master password and the stored device secret are handed to the crypto layer.
+
+### 3. Key derivation (`computeMasterKey()` in `src/utils/add.py`)
+
+```python
+key = PBKDF2(master_password, device_secret, 32, count=1000000, hmac_hash_module=SHA512)
 ```
-sudo apt install python3-pip
+
+The 256-bit key is derived fresh each time from the master password (input) and the device secret (salt). Nothing about this key is stored.
+
+### 4. Encryption / decryption (`src/utils/aesutils.py`)
+
+- **Encrypt:** a random IV is generated (`AES.block_size`), the plaintext is padded to the block size, encrypted with **AES-256-CBC**, and the IV is prepended to the ciphertext. The result is base64-encoded and stored in the `password` column.
+- **Decrypt:** the base64 blob is decoded, the IV is split off the front, and the remainder is decrypted and unpadded. Invalid padding raises an error.
+
+> Note: the crypto layer is called with `keyType="bytes"`, so the derived 32-byte key is passed through `SHA256` once more inside `aesutils` to produce the final AES key. The effective cipher is still AES-256-CBC.
+
+### 5. Storage format
+
+Encrypted passwords are stored as base64 strings in the MariaDB `pm.entries` table alongside the (plaintext) site metadata. Decryption only happens on demand, and the decrypted password is written to the clipboard rather than printed. All lookups issued against the database use **parameterized queries** (driver `%s` placeholders with a params tuple), so user-supplied search values can never alter the query structure — the search is **safe against SQL injection**.
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3
+- MariaDB or MySQL server running locally
+
+### Configure the database connection (environment variables)
+
+Database credentials are **not** hardcoded. `src/utils/dbconfig.py` reads them from environment variables:
+
+| Variable      | Required | Default     | Description                                             |
+| ------------- | -------- | ----------- | ------------------------------------------------------- |
+| `DB_HOST`     | no       | `localhost` | Database server host                                    |
+| `DB_PORT`     | no       | `3306`      | Database server port                                    |
+| `DB_USER`     | no       | `root`      | Database user                                           |
+| `DB_NAME`     | no       | *(unset)*   | Optional default schema (tables are fully qualified)    |
+| `DB_PASSWORD` | **yes**  | *(none)*    | Database password — the app refuses to start if unset   |
+
+Copy the template and set your own values (never commit real secrets):
+
+```bash
+cp .env.example .env      # then edit .env
+# export them into your shell before running, e.g.:
+export DB_HOST=localhost
+export DB_USER=root
+export DB_PASSWORD='your-db-password'
+```
+
+See [`.env.example`](.env.example) for the full list. There is intentionally **no default password**: if `DB_PASSWORD` is unset the program exits with a clear message rather than connecting insecurely.
+
+### Install dependencies
+
+```bash
 pip install -r requirements.txt
 ```
 
-### MariaDB
-#### Install MariaDB on linux with apt
-```
-sudo apt update
-sudo apt install mariadb-server mariadb-client -y
-```
+`requirements.txt` pins: `mysql-connector-python`, `pycryptodome`, `pyperclip`, `rich`, `commonmark`, `Pygments`, `protobuf`.
 
-## Windows
-### Install Python Requirements
-```pip install -r requirements.txt```
+### Configure (run once)
 
-### MariaDB
-#### Install
-Follow [these instructions](https://www.dataquest.io/blog/install-mysql-windows/) to install MariaDB on Windows
+From the `src/` directory, create the database, tables, and master password:
 
-## Run
-### Configure
-
-You need to first configure the password manager by choosing a MASTER PASSWORD. This config step is only required to be executed once.
-```
+```bash
+cd src
 python config.py
 ```
-The above command will make a new configuration by asking you to choose a MASTER PASSWORD.
 
-### Usage
-```
+You will be asked to choose and confirm a master password. A device secret is generated automatically.
+
+### Run
+
+```bash
 python pm.py -h
-usage: pm.py [-h] [-s NAME] [-u URL] [-e EMAIL] [-l LOGIN] [--length LENGTH] [-c] option
+```
 
-Description
+```
+usage: pm.py [-h] [-s NAME] [-u URL] [-e EMAIL] [-l LOGIN] [--length LENGTH] [-c] option
 
 positional arguments:
   option                (a)dd / (e)xtract / (g)enerate
@@ -59,30 +142,68 @@ optional arguments:
   -c, --copy            Copy password to clipboard
 ```
 
+## Usage / Examples
 
-### Add entry
-```
+### Add an entry
+
+```bash
 python pm.py add -s mysite -u mysite.com -e hello@email.com -l myusername
 ```
-### Retrieve entry
-```
+
+You are prompted for the master password and then the password to store.
+
+### Retrieve entries
+
+```bash
+# Retrieve all entries (passwords hidden in the table)
 python pm.py extract
-```
-The above command retrieves all the entries
-```
+
+# Retrieve entries whose site name is "mysite"
 python pm.py e -s mysite
-```
-The above command retrieves all the entries whose site name is "mysite"
-```
+
+# Retrieve the entry for a specific site + username
 python pm.py e -s mysite -l myusername
-```
-The above command retrieves the entry whose site name is "mysite" and username is "myusername"
-```
+
+# Copy the matching password to the clipboard (single match only)
 python pm.py e -s mysite -l myusername --copy
 ```
-The above command copies the password of the site "mysite" and username "myusername" into the clipboard
-### Generate Password
-```
+
+### Generate a password
+
+```bash
+# Generate a 15-character random password and copy it to the clipboard
 python pm.py g --length 15
 ```
-The above command generates a password of length 15 and copies to clipboard
+
+## Project Structure
+
+```
+Password-Manager-master/
+├── README.md
+├── requirements.txt
+├── .env.example              # Documents the DB_* environment variables (no secrets)
+└── src/
+    ├── config.py              # One-time setup: creates DB/tables, salted PBKDF2 master hash + device secret
+    ├── pm.py                  # CLI entry point (argparse), constant-time master-password auth, command routing
+    └── utils/
+        ├── add.py             # PBKDF2 key derivation + encrypt & (parameterized) insert an entry
+        ├── retrieve.py        # Parameterized search, render table, decrypt-to-clipboard
+        ├── generate.py        # Random password generator
+        ├── aesutils.py        # AES-256-CBC encrypt/decrypt helpers (pycryptodome)
+        └── dbconfig.py        # MariaDB/MySQL connection factory (env-var credentials)
+```
+
+## Security Notes
+
+This is a learning-oriented, local-first tool. Implemented protections and honest caveats:
+
+- **Encryption is real:** stored passwords are protected with AES-256, and the key is derived on demand via PBKDF2 (1,000,000 iterations, HMAC-SHA512) rather than being stored. The master password is never persisted.
+- **Master-password verification is salted and iterated.** The stored value is `PBKDF2-HMAC-SHA256` over the master password with a random per-install 16-byte salt (200,000 iterations), compared in **constant time** via `hmac.compare_digest`. This resists rainbow-table and fast offline brute-force attacks and defeats timing side channels. (This gates access only; it is separate from the AES key derivation.)
+- **Queries are parameterized.** All database lookups use the driver's `%s` placeholders with a params tuple (with column names drawn from a fixed internal whitelist), so search inputs cannot be used for **SQL injection**.
+- **No hardcoded credentials.** Database connection settings are read from environment variables (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_NAME`, `DB_PASSWORD`); a missing `DB_PASSWORD` causes a fast, explicit failure instead of an insecure default. See `.env.example`.
+- **The device secret (AES-key PBKDF2 salt) is stored in the same database** as the encrypted data. If an attacker obtains the database, security rests entirely on the strength of the master password.
+- **The threat model is local storage at rest**, not a hardened multi-user or networked deployment. Treat this as a personal/educational project, not audited security software.
+
+## Author
+
+**Aviral Kumar Singh** — [https://github.com/Apilex100](https://github.com/Apilex100)
