@@ -13,15 +13,26 @@ def retrieveEntries(mp, ds, search, decryptPassword = False):
     cursor = db.cursor()
 
     query = ""
+    params = ()
     if len(search) == 0:
         query = "SELECT * FROM pm.entries"
     else:
-        query = "SELECT * FROM pm.entries WHERE "
-        for i in search:
-            query += f"{i} = '{search[i]}' AND "
-        query = query[:-5]
+        # Build a parameterized WHERE clause to prevent SQL injection: the
+        # column names come from a fixed internal whitelist (never raw user
+        # input), while all user-supplied *values* are bound via %s
+        # placeholders instead of being formatted into the query string.
+        allowed_columns = {"sitename", "siteurl", "email", "username"}
+        conditions = []
+        values = []
+        for column in search:
+            if column not in allowed_columns:
+                continue
+            conditions.append(f"{column} = %s")
+            values.append(search[column])
+        query = "SELECT * FROM pm.entries WHERE " + " AND ".join(conditions)
+        params = tuple(values)
 
-    cursor.execute(query)
+    cursor.execute(query, params)
     results = cursor.fetchall()
 
     if len(results) == 0:
