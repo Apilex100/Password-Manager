@@ -2,7 +2,7 @@ from utils.dbconfig import dbconfig
 
 import sys
 import string
-import random
+import secrets
 import hashlib
 import os
 from getpass import getpass
@@ -20,7 +20,11 @@ MASTER_HASH_ITERATIONS = 200000
 
 
 def generateDeviceSecret(length = 15):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k = length))
+    # The device secret is used as a cryptographic salt for AES key derivation,
+    # so it must come from a CSPRNG (`secrets`), not the non-cryptographic
+    # `random` module.
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
 def hashMasterPassword(mp, salt, iterations=MASTER_HASH_ITERATIONS):
@@ -45,7 +49,8 @@ def config():
         cursor.execute("CREATE DATABASE pm")
     except Exception as e:
         printc("[red][!] An error occured while trying to create db.")
-        console.print_exception(show_locals=True)
+        # Do not show locals: they can contain the DB password and other secrets.
+        console.print_exception(show_locals=False)
         sys.exit(0)
     printc("[green][+][/green] Database 'pm' created")
 
