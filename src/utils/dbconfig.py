@@ -53,7 +53,8 @@ def dbconfig():
     try:
         db = mysql.connector.connect(**connect_kwargs)
     except Exception:
-        console.print_exception(show_locals=True)
+        # Do not show locals: `connect_kwargs`/`password` hold the DB secret.
+        console.print_exception(show_locals=False)
         sys.exit(1)
 
     return db
